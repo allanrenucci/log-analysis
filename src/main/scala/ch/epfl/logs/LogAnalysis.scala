@@ -1,5 +1,6 @@
 package ch.epfl.logs
 
+import org.apache.spark.SparkContext.rddToPairRDDFunctions
 import org.apache.spark.mllib.evaluation.BinaryClassificationMetrics
 import org.apache.spark.mllib.linalg.DenseVector
 import org.apache.spark.mllib.regression.LabeledPoint
@@ -13,54 +14,63 @@ import org.apache.spark.{SparkConf, SparkContext}
 object LogAnalysis {
 
 //  val INPUT_SOURCE = "/user/renucci/input/clusterlogs"
-  val INPUT_SOURCE = "/datasets//datasets/clusterlogs_hw2/*"
+  val INPUT_SOURCE = "/datasets/clusterlogs_hw2/*"
   val CROSS_VALIDATION_NUMBER = 5
 
-  val FEATURES_NUMBER = 5
-
-  object Status extends Enumeration {
-    type Status = Value
-    val UNSET, SUCCEEDED, FAILED = Value
+  object Feature extends Enumeration {
+    type Feature = Value
+    type Features = Map[Feature, Double]
+    val SUCCESS, TIME, ALLOC, KILLED, PMEM, VMEM = Value
+    val orderedValues = (values - SUCCESS).toList
   }
 
-  import Status._
+  import Feature._
 
-  case class Point(var status: Status, features: Array[Double]) {
-    override def toString = {
-      val fs = features mkString ("Array(", " ,", ")")
-      s"Point($status, $fs)"
-    }
+
+  private def getPoint(log: ApplicationLog): Features = log match {
+    case AppSummary(_, _, _, _, _, _, _, start, end, status) =>
+      val success = if (status == "FAILED") 0.0 else 1.0
+      val time = end - start
+      Map(SUCCESS -> success, TIME -> time)
+
+    case AllocatedContainer(_, _, _) =>
+      Map(ALLOC -> 1)
+
+    case KilledContainer(_, _, _) =>
+      Map(KILLED -> 1)
+
+    case MemoryUsage(_, _, _, pMem, vMem) =>
+      Map(PMEM -> pMem, VMEM -> vMem)
   }
 
-  private def getLabeledPoint(logs: Iterable[ApplicationLog]): Option[LabeledPoint] = {
-    val point = Point(UNSET, Array.ofDim(FEATURES_NUMBER))
+  private def mergeFeatures(fs1: Features, fs2: Features): Features = (fs2 foldLeft fs1) {
+    case (acc, succ @ (SUCCESS, _)) =>
+      acc + succ
 
-    logs foreach {
-      case AppSummary(_, _, _, _, _, _, _, start, end, status) =>
-        point.status = if (status == "FAILED") FAILED else SUCCEEDED
-        point.features(0) = end - start
+    case (acc, time @ (TIME, _)) =>
+      acc + time
 
-      case AllocatedContainer(_, _, _) =>
-        point.features(1) += 1
+    case (acc, (ALLOC, killed)) =>
+      val next = killed + acc.getOrElse(ALLOC, 0.0)
+      acc + (ALLOC -> next)
 
-      case KilledContainer(_, _, _) =>
-        point.features(2) += 1
+    case (acc, (KILLED, killed)) =>
+      val next = killed + acc.getOrElse(KILLED, 0.0)
+      acc + (KILLED -> next)
 
-//      // Seems to be redundant
-//      case ExitedWithSuccessContainer( _, _, _) =>
-//        point.features(2) += 1
+    case (acc, (PMEM, pmem)) =>
+      val next = pmem max acc.getOrElse(PMEM, 0.0)
+      acc + (PMEM -> next)
 
-      case MemoryUsage(_, _, _, pMem, vMem) =>
-        point.features(3) = point.features(3) max pMem
-        point.features(4) = point.features(4) max vMem
-    }
+    case (acc, (VMEM, vmem)) =>
+      val next = vmem max acc.getOrElse(VMEM, 0.0)
+      acc + (VMEM -> next)
+  }
 
-    val Point(status, features) = point
-    //println(point)
-    status match {
-      case SUCCEEDED => Some(LabeledPoint(1.0, new DenseVector(features)))
-      case FAILED    => Some(LabeledPoint(0.0, new DenseVector(features)))
-      case UNSET     => None
+  private def getLabeledPoints(features: Features): Option[LabeledPoint] = {
+    features get SUCCESS map { succ =>
+      val fs = Feature.orderedValues map (f => features getOrElse (f, 0.0))
+      LabeledPoint(succ, new DenseVector(fs.toArray))
     }
   }
 
@@ -77,7 +87,7 @@ object LogAnalysis {
     val categoricalFeaturesInfo = Map[Int, Int]()
     val impurity = "gini"
     val maxDepth = 5
-    val maxBins = 32
+    val maxBins = 30
 
     val model = DecisionTree.trainClassifier(training, numClasses, categoricalFeaturesInfo,
       impurity, maxDepth, maxBins)
@@ -96,14 +106,19 @@ object LogAnalysis {
   def main(args: Array[String]) {
 //    val sc = new SparkContext(new SparkConf() setAppName "LogAnalysis" setMaster "local")
     val sc = new SparkContext(new SparkConf() setAppName "LogAnalysis")
-    val lines = sc textFile INPUT_SOURCE
 
-    // Only keep useful log lines
-    val logs = lines map parseLine collect { case log: ApplicationLog => log }
+    val logLines = sc textFile INPUT_SOURCE
 
-    // Logs grouped by application
-    val appLogs = logs groupBy (_.appId)
-    val data = (appLogs flatMap (l => getLabeledPoint(l._2))).cache()
+    // Parse log lines and keep those associated to an application
+    val logs = logLines map parseLine collect { case log: ApplicationLog => log }
+
+    // Group logs by application id and get associated points
+    val points = logs map(l => (l.appId, getPoint(l))) reduceByKey mergeFeatures
+
+    // Get labeled points for MLlib
+    val data = points flatMap (p => getLabeledPoints(p._2))
+
+    data.cache()
 
     val meanROC = (0 until CROSS_VALIDATION_NUMBER)
       .map (_ => validateModel(data))
