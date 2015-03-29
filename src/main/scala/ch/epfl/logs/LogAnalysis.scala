@@ -12,9 +12,7 @@ import org.apache.spark.{SparkConf, SparkContext}
  * Created by renucci on 20/03/15.
  */
 object LogAnalysis {
-
-//  val INPUT_SOURCE = "/user/renucci/input/clusterlogs"
-  val INPUT_SOURCE = "/datasets/clusterlogs_hw2/*"
+  val DEFAULT_INPUT_SOURCE = "/datasets/clusterlogs_hw2/*"
   val CROSS_VALIDATION_NUMBER = 5
 
   object Feature extends Enumeration {
@@ -104,19 +102,25 @@ object LogAnalysis {
   }
 
   def main(args: Array[String]) {
-//    val sc = new SparkContext(new SparkConf() setAppName "LogAnalysis" setMaster "local")
-    val sc = new SparkContext(new SparkConf() setAppName "LogAnalysis")
+    val inputSource = if (args.length > 0) args(0) else DEFAULT_INPUT_SOURCE
 
-    val logLines = sc textFile INPUT_SOURCE
+    val conf = new SparkConf() setAppName "LogAnalysis"
+    val sc = new SparkContext(conf)
 
-    // Parse log lines and keep those associated to an application
-    val logs = logLines map parseLine collect { case log: ApplicationLog => log }
+    val logLines = sc textFile inputSource
 
-    // Group logs by application id and get associated points
-    val points = logs map(l => (l.appId, getPoint(l))) reduceByKey mergeFeatures
+    // Parse log lines
+    val logs = logLines map parseLine
 
-    // Get labeled points for MLlib
-    val data = points flatMap (p => getLabeledPoints(p._2))
+    // Get points
+    val points = logs collect { case log: ApplicationLog =>
+      val appId = log.appId
+      val point = getPoint(log)
+      (appId, point)
+    }
+
+    // Group points by application and get the associated labeled point
+    val data = points reduceByKey mergeFeatures flatMap (p => getLabeledPoints(p._2))
 
     data.cache()
 
