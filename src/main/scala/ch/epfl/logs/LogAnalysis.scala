@@ -12,7 +12,7 @@ import org.apache.spark.{SparkConf, SparkContext}
  * Created by renucci on 20/03/15.
  */
 object LogAnalysis {
-  val DEFAULT_INPUT_SOURCE = "/datasets/clusterlogs_hw2/*"
+  val DEFAULT_INPUT_SOURCE = "/datasets/clusterlogs/*"
   val CROSS_VALIDATION_NUMBER = 5
 
   object Feature extends Enumeration {
@@ -83,7 +83,7 @@ object LogAnalysis {
 
     val numClasses = 2
     val categoricalFeaturesInfo = Map[Int, Int]()
-    val impurity = "gini"
+    val impurity = "entropy"
     val maxDepth = 5
     val maxBins = 30
 
